@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data / caches
+data/cache/
+data/raw/
+data/processed/
+
+# Outputs
+outputs/
+*.xlsx
+*.csv
+*.pdf
+*.png
+*.jpg
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.env.example
