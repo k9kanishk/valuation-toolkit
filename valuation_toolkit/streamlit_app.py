@@ -13,12 +13,15 @@ from src.valuation import ValuationEngine
 
 st.set_page_config(page_title='Comparable Company + DCF Toolkit', layout='wide')
 st.title('Comparable Company + DCF Valuation Toolkit')
-st.caption('Real-data U.S. public comps, automated peer selection, trading multiples, and DCF output pack.')
+st.caption(
+    'Real-data U.S. public comps, automated peer selection, trading multiples, and DCF output pack. '
+    'Free FMP keys may fall back to annual-only data where quarterly/peer endpoints are unavailable.'
+)
 
 with st.sidebar:
     st.header('Inputs')
     ticker = st.text_input('Target ticker', value='AAPL').upper().strip()
-    max_peers = st.slider('Max peers', min_value=5, max_value=12, value=8)
+    max_peers = st.slider('Max peers', min_value=4, max_value=10, value=6)
     erp = st.number_input('Equity risk premium', min_value=0.02, max_value=0.08, value=0.045, step=0.0025, format='%.4f')
     terminal_growth = st.number_input('Terminal growth', min_value=0.01, max_value=0.04, value=0.025, step=0.0025, format='%.4f')
     run = st.button('Run valuation', type='primary')
