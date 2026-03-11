@@ -148,26 +148,79 @@ class FMPClient(HTTPClient):
 class SECClient(HTTPClient):
     def __init__(self):
         super().__init__(cache_subdir="sec", ttl_hours=24)
+
+        # Do NOT hardcode Host. Let requests set it from the URL.
         self.headers = {
             "User-Agent": settings.sec_user_agent,
             "Accept-Encoding": "gzip, deflate",
-            "Host": "data.sec.gov",
         }
 
     def ticker_map(self) -> pd.DataFrame:
-        url = "https://www.sec.gov/files/company_tickers_exchange.json"
-        payload = self.get_json(url, headers=self.headers, prefix="sec_ticker_map")
-        columns = payload.get("fields", [])
-        rows = payload.get("data", [])
-        return pd.DataFrame(rows, columns=columns)
+        # Official current path per SEC docs
+        primary_url = "https://www.sec.gov/files/company_tickers_exchange.json"
+        fallback_url = "https://www.sec.gov/files/company_tickers.json"
+
+        try:
+            payload = self.get_json(primary_url, headers=self.headers, prefix="sec_ticker_map_exchange")
+            columns = payload.get("fields", [])
+            rows = payload.get("data", [])
+            df = pd.DataFrame(rows, columns=columns)
+
+            # normalize expected columns
+            rename_map = {}
+            if "cik" in df.columns and "cik_str" not in df.columns:
+                rename_map["cik"] = "cik"
+            if rename_map:
+                df = df.rename(columns=rename_map)
+
+            if "ticker" not in df.columns:
+                raise ValueError("SEC exchange ticker file did not contain expected 'ticker' column.")
+            return df
+
+        except Exception:
+            # Fallback to older/simple ticker mapping structure
+            payload = self.get_json(fallback_url, headers=self.headers, prefix="sec_ticker_map_basic")
+
+            # company_tickers.json is usually keyed dict: {"0": {...}, "1": {...}}
+            if isinstance(payload, dict):
+                rows = list(payload.values())
+            elif isinstance(payload, list):
+                rows = payload
+            else:
+                raise ValueError("Unexpected SEC ticker file format.")
+
+            df = pd.DataFrame(rows)
+
+            # normalize columns to what lookup_ticker expects
+            if "cik_str" not in df.columns and "cik" in df.columns:
+                df["cik_str"] = df["cik"].astype(str).str.zfill(10)
+            elif "cik_str" in df.columns:
+                df["cik_str"] = df["cik_str"].astype(str).str.zfill(10)
+
+            if "ticker" in df.columns:
+                df["ticker"] = df["ticker"].astype(str)
+            else:
+                raise ValueError("SEC basic ticker file missing 'ticker' column.")
+
+            if "title" in df.columns and "name" not in df.columns:
+                df["name"] = df["title"]
+
+            if "exchange" not in df.columns:
+                df["exchange"] = None
+
+            return df
 
     def lookup_ticker(self, symbol: str) -> dict[str, Any] | None:
         df = self.ticker_map()
-        matched = df[df["ticker"].str.upper() == symbol.upper()]
+        matched = df[df["ticker"].astype(str).str.upper() == symbol.upper()]
         if matched.empty:
             return None
+
         row = matched.iloc[0].to_dict()
-        row["cik_str"] = str(row.get("cik", "")).zfill(10)
+
+        # normalize cik field
+        cik_val = row.get("cik_str") or row.get("cik")
+        row["cik_str"] = str(cik_val).zfill(10) if cik_val is not None else None
         return row
 
     def company_facts(self, cik: str) -> dict[str, Any]:
