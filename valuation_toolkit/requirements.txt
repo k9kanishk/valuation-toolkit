@@ -5,3 +5,4 @@ python-dotenv>=1.0.1
 streamlit>=1.44.0
 plotly>=5.20.0
 XlsxWriter>=3.2.0
+yfinance>=0.2.54
