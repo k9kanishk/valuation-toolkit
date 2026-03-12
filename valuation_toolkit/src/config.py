@@ -23,6 +23,7 @@ class Settings:
     sec_user_agent: str = os.getenv('SEC_USER_AGENT', 'ValuationToolkit contact@example.com').strip()
     cache_ttl_hours: int = int(os.getenv('CACHE_TTL_HOURS', '12'))
     default_currency: str = os.getenv('DEFAULT_CURRENCY', 'USD').strip().upper()
+    use_fmp: bool = os.getenv('USE_FMP', 'true').lower() == 'true'
     fmp_base_url: str = 'https://financialmodelingprep.com/stable'
     sec_base_url: str = 'https://data.sec.gov'
     treasury_url: str = (

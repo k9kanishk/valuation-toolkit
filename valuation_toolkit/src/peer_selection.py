@@ -59,7 +59,7 @@ class PeerSelector:
             + 0.40 * candidate_df["size_score"]
         )
 
-        shortlist_n = max(14, max_peers * 3)
+        shortlist_n = min(max(8, max_peers * 2), 10)
         shortlist_symbols = (
             candidate_df.sort_values(["rough_score", "market_cap"], ascending=[False, False])
             .head(shortlist_n)["symbol"]
@@ -78,7 +78,7 @@ class PeerSelector:
         # One more last resort if hydration fails badly
         if not peer_snapshots:
             logger.warning("Shortlist hydration failed. Trying fallback universe directly.")
-            for symbol in LIQUID_US_FALLBACK[:20]:
+            for symbol in LIQUID_US_FALLBACK[:10]:
                 if symbol == target.symbol:
                     continue
                 try:
@@ -145,10 +145,11 @@ class PeerSelector:
 
     def _get_candidates(self, target: CompanySnapshot) -> list[dict[str, Any]]:
         stock_peer_symbols = set()
-        try:
-            stock_peer_symbols = set(self.builder.fmp.stock_peers(target.symbol))
-        except Exception as exc:
-            logger.warning("stock_peers failed for %s: %s", target.symbol, exc)
+        if self.builder.fmp:
+            try:
+                stock_peer_symbols = set(self.builder.fmp.stock_peers(target.symbol))
+            except Exception as exc:
+                logger.warning("stock_peers failed for %s: %s", target.symbol, exc)
 
         target_market_cap = safe_float(target.market_cap)
         sector = target.sector if target.sector and target.sector != "Unknown" else None
@@ -260,6 +261,9 @@ class PeerSelector:
         market_cap_max: float | None,
         limit: int,
     ) -> list[dict[str, Any]]:
+        if not self.builder.fmp:
+            return []
+
         try:
             rows = self.builder.fmp.screener(
                 sector=sector,
