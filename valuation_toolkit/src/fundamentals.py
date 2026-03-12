@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 
 from .data_clients import FMPClient, SECClient, TreasuryClient, YahooClient
+
+from .config import settings
 from .utils import safe_div, safe_float
 
 
@@ -42,14 +44,19 @@ class CompanySnapshot:
 
 
 class FundamentalsBuilder:
-    def __init__(self):
-        try:
-            self.fmp = FMPClient()
-        except ValueError:
-            self.fmp = None
+    def __init__(self, use_fmp: bool = True):
         self.sec = SECClient()
         self.treasury = TreasuryClient()
         self.yahoo = YahooClient()
+
+        self.fmp = None
+        if use_fmp and settings.use_fmp:
+            try:
+                self.fmp = FMPClient()
+            except Exception:
+                self.fmp = None
+
+        self._snapshot_cache: dict[str, CompanySnapshot] = {}
 
     @staticmethod
     def _df_row_sum(df: pd.DataFrame | None, candidates: list[str]) -> float:
@@ -81,6 +88,8 @@ class FundamentalsBuilder:
 
     def build_snapshot(self, symbol: str) -> CompanySnapshot:
         symbol = symbol.upper().strip()
+        if symbol in self._snapshot_cache:
+            return self._snapshot_cache[symbol]
 
         profile = self.fmp.profile(symbol) if self.fmp else {}
         quote = self.fmp.quote(symbol) if self.fmp else {}
@@ -118,15 +127,12 @@ class FundamentalsBuilder:
             or safe_float(yq.get('marketCap'))
         )
 
-        # Fallback 1: derive market cap if price and shares are present
         if (not market_cap or pd.isna(market_cap)) and price and shares_outstanding:
             market_cap = price * shares_outstanding
 
-        # Fallback 2: derive shares outstanding if market cap and price are present
         if (not shares_outstanding or pd.isna(shares_outstanding)) and market_cap and price and price > 0:
             shares_outstanding = market_cap / price
 
-        # Final cleanup
         price = float(price or 0.0)
         market_cap = float(market_cap or 0.0)
         shares_outstanding = float(shares_outstanding or 0.0)
@@ -234,7 +240,7 @@ class FundamentalsBuilder:
             or 0.0
         )
 
-        return CompanySnapshot(
+        snapshot = CompanySnapshot(
             symbol=symbol,
             name=str(name),
             sector=str(sector),
@@ -260,3 +266,5 @@ class FundamentalsBuilder:
             interest_expense=float(interest_expense or 0.0),
             cik=cik,
         )
+        self._snapshot_cache[symbol] = snapshot
+        return snapshot

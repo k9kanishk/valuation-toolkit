@@ -19,6 +19,10 @@ class PaidPlanRequiredError(RuntimeError):
     pass
 
 
+class RateLimitExceededError(RuntimeError):
+    pass
+
+
 class HTTPClient:
     def __init__(self, cache_subdir: str, ttl_hours: int | None = None):
         self.cache_dir = CACHE_DIR / cache_subdir
@@ -51,8 +55,11 @@ class HTTPClient:
             status = exc.response.status_code if exc.response is not None else None
             if status == 402:
                 raise PaidPlanRequiredError(
-                    f"402 Payment Required for {url}. "
-                    "Your current FMP plan/key does not include this endpoint or parameter set."
+                    f"402 Payment Required for {url}. Endpoint not available on current plan."
+                ) from exc
+            if status == 429:
+                raise RateLimitExceededError(
+                    f"429 Too Many Requests for {url}. Daily quota/rate limit exceeded."
                 ) from exc
             raise
 
@@ -68,6 +75,7 @@ class FMPClient(HTTPClient):
         if not settings.fmp_api_key:
             raise ValueError("Missing FMP_API_KEY in environment.")
         self.base_url = settings.fmp_base_url
+        self.disabled = False
 
     def _get(self, endpoint: str, **params: Any) -> Any:
         merged = {k: v for k, v in params.items() if v is not None}
@@ -79,10 +87,20 @@ class FMPClient(HTTPClient):
         )
 
     def _get_optional(self, endpoint: str, default: Any, **params: Any) -> Any:
+        if self.disabled:
+            return default
+
         try:
             return self._get(endpoint, **params)
         except PaidPlanRequiredError as exc:
             logger.warning("Skipping paid/gated FMP endpoint %s: %s", endpoint, exc)
+            return default
+        except RateLimitExceededError as exc:
+            logger.warning("FMP rate limit hit. Disabling FMP for this run: %s", exc)
+            self.disabled = True
+            return default
+        except Exception as exc:
+            logger.warning("FMP endpoint failed %s: %s", endpoint, exc)
             return default
 
     def profile(self, symbol: str) -> dict[str, Any]:
