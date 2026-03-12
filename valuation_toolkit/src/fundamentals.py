@@ -127,16 +127,6 @@ class FundamentalsBuilder:
             or safe_float(yq.get('marketCap'))
         )
 
-        if (not market_cap or pd.isna(market_cap)) and price and shares_outstanding:
-            market_cap = price * shares_outstanding
-
-        if (not shares_outstanding or pd.isna(shares_outstanding)) and market_cap and price and price > 0:
-            shares_outstanding = market_cap / price
-
-        price = float(price or 0.0)
-        market_cap = float(market_cap or 0.0)
-        shares_outstanding = float(shares_outstanding or 0.0)
-
         total_debt = (
             safe_float(yq.get('totalDebt'))
             or self._df_latest_value(q_bs, ['Total Debt', 'Current Debt And Capital Lease Obligation'])
@@ -187,6 +177,32 @@ class FundamentalsBuilder:
         enterprise_value = safe_float(ev_rows[0].get('enterpriseValue')) if ev_rows else np.nan
         if pd.isna(enterprise_value):
             enterprise_value = safe_float(yq.get('enterpriseValue')) or (market_cap + total_debt - cash if market_cap else np.nan)
+
+        price = float(price or 0.0)
+        market_cap = float(market_cap or 0.0)
+        shares_outstanding = float(shares_outstanding or 0.0)
+        enterprise_value = float(enterprise_value or 0.0)
+        total_debt = float(total_debt or 0.0)
+        cash = float(cash or 0.0)
+        net_debt = float(net_debt or 0.0)
+
+        # Derive missing shares outstanding from market cap / price
+        if shares_outstanding <= 0 and market_cap > 0 and price > 0:
+            shares_outstanding = market_cap / price
+
+        # Derive missing market cap from price * shares
+        if market_cap <= 0 and price > 0 and shares_outstanding > 0:
+            market_cap = price * shares_outstanding
+
+        # Derive missing market cap from EV - net debt
+        if market_cap <= 0 and enterprise_value > 0:
+            derived_mc = enterprise_value - net_debt
+            if derived_mc > 0:
+                market_cap = derived_mc
+
+        # Derive missing EV from market cap + net debt
+        if enterprise_value <= 0 and market_cap > 0:
+            enterprise_value = market_cap + net_debt
 
         revenue_growth = np.nan
         if q_is is not None and not q_is.empty:
