@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .fundamentals import CompanySnapshot
-from .utils import safe_div, weighted_average, winsorize_series
+from .utils import safe_div, safe_per_share, weighted_average, winsorize_series
 
 
 @dataclass
@@ -107,7 +107,7 @@ class ValuationEngine:
                 else:
                     implied_equity = multiple * base_value
                     implied_ev = implied_equity + target.net_debt
-                implied_price = safe_div(implied_equity, target.shares_out)
+                implied_price = safe_per_share(implied_equity, target.shares_out)
                 rows.append(
                     {
                         'method': metric,
@@ -186,7 +186,7 @@ class ValuationEngine:
         terminal_pv = terminal_value / ((1 + wacc) ** years)
         enterprise_value = forecast['pv_fcff'].sum() + terminal_pv
         equity_value = enterprise_value - target.net_debt
-        price_per_share = safe_div(equity_value, target.shares_out)
+        price_per_share = safe_per_share(equity_value, target.shares_out)
 
         dcf_summary = pd.DataFrame(
             [
@@ -222,24 +222,24 @@ class ValuationEngine:
         wacc_range = [base_wacc - 0.01, base_wacc - 0.005, base_wacc, base_wacc + 0.005, base_wacc + 0.01]
         tg_range = [self.terminal_growth - 0.01, self.terminal_growth - 0.005, self.terminal_growth, self.terminal_growth + 0.005, self.terminal_growth + 0.01]
 
-        rows = []
         last_fcff = forecast.iloc[-1]['fcff']
         explicit_pv = forecast['pv_fcff'].sum()
         last_year = int(forecast.iloc[-1]['year'])
+        grid = pd.DataFrame(index=tg_range, columns=[f'{wacc:.3%}' for wacc in wacc_range], dtype=float)
 
-        for tg in tg_range:
-            row = {'terminal_growth': tg}
+        for terminal_growth in tg_range:
             for wacc in wacc_range:
-                if wacc <= tg:
-                    row[f'{wacc:.3%}'] = np.nan
+                if terminal_growth >= wacc:
+                    grid.loc[terminal_growth, f'{wacc:.3%}'] = np.nan
                     continue
-                tv = last_fcff * (1 + tg) / (wacc - tg)
-                pv_tv = tv / ((1 + wacc) ** last_year)
-                ev = explicit_pv + pv_tv
-                eq = ev - target.net_debt
-                row[f'{wacc:.3%}'] = safe_div(eq, target.shares_out)
-            rows.append(row)
-        return pd.DataFrame(rows)
+                terminal_value = last_fcff * (1 + terminal_growth) / (wacc - terminal_growth)
+                pv_terminal_value = terminal_value / ((1 + wacc) ** last_year)
+                enterprise_value = explicit_pv + pv_terminal_value
+                equity_value = enterprise_value - target.net_debt
+                grid.loc[terminal_growth, f'{wacc:.3%}'] = safe_per_share(equity_value, target.shares_out)
+
+        grid = grid.reset_index().rename(columns={'index': 'terminal_growth'})
+        return grid
 
     def _commentary(
         self,

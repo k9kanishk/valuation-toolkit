@@ -105,20 +105,31 @@ class FundamentalsBuilder:
         industry = profile.get('industry') or yq.get('industry') or 'Unknown'
         currency = profile.get('currency') or 'USD'
 
-        price = safe_float(quote.get('price')) or safe_float(profile.get('price')) or safe_float(yq.get('price'))
-        shares_out = (
+        shares_outstanding = (
             safe_float(metrics.get('sharesOutstanding'))
             or safe_float(quote.get('sharesOutstanding'))
-            or safe_float(profile.get('sharesOutstanding'))
             or safe_float(yq.get('sharesOutstanding'))
         )
+
+        price = safe_float(quote.get('price')) or safe_float(yq.get('price'))
+
         market_cap = (
             safe_float(quote.get('marketCap'))
-            or safe_float(profile.get('mktCap'))
-            or safe_float(profile.get('marketCap'))
             or safe_float(yq.get('marketCap'))
-            or (price * shares_out if price and shares_out else np.nan)
         )
+
+        # Fallback 1: derive market cap if price and shares are present
+        if (not market_cap or pd.isna(market_cap)) and price and shares_outstanding:
+            market_cap = price * shares_outstanding
+
+        # Fallback 2: derive shares outstanding if market cap and price are present
+        if (not shares_outstanding or pd.isna(shares_outstanding)) and market_cap and price and price > 0:
+            shares_outstanding = market_cap / price
+
+        # Final cleanup
+        price = float(price or 0.0)
+        market_cap = float(market_cap or 0.0)
+        shares_outstanding = float(shares_outstanding or 0.0)
 
         total_debt = (
             safe_float(yq.get('totalDebt'))
@@ -141,8 +152,8 @@ class FundamentalsBuilder:
         net_debt = max(total_debt - cash, 0.0)
 
         revenue_ltm = (
-            safe_float(ratios.get('revenuePerShareTTM')) * shares_out
-            if safe_float(ratios.get('revenuePerShareTTM')) and shares_out
+            safe_float(ratios.get('revenuePerShareTTM')) * shares_outstanding
+            if safe_float(ratios.get('revenuePerShareTTM')) and shares_outstanding
             else np.nan
         )
         if pd.isna(revenue_ltm):
@@ -230,7 +241,7 @@ class FundamentalsBuilder:
             industry=str(industry),
             currency=str(currency),
             price=float(price or 0.0),
-            shares_out=float(shares_out or 0.0),
+            shares_out=float(shares_outstanding or 0.0),
             market_cap=float(market_cap or 0.0),
             total_debt=float(total_debt or 0.0),
             cash=float(cash or 0.0),

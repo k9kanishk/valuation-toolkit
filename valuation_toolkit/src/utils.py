@@ -64,6 +64,16 @@ def safe_div(numerator: Any, denominator: Any, default: float = np.nan) -> float
     return num / den
 
 
+def safe_per_share(value: Any, shares_outstanding: Any) -> float:
+    shares = safe_float(shares_outstanding, default=np.nan)
+    amount = safe_float(value, default=np.nan)
+    if pd.isna(shares) or shares <= 0:
+        return np.nan
+    if pd.isna(amount):
+        return np.nan
+    return amount / shares
+
+
 
 def winsorize_series(series: pd.Series, lower: float = 0.05, upper: float = 0.95) -> pd.Series:
     clean = series.astype(float).copy()
