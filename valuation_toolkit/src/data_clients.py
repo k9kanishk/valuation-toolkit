@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -234,33 +233,128 @@ class TreasuryClient(HTTPClient):
         super().__init__(cache_subdir="treasury", ttl_hours=24)
 
     def current_risk_free_rate(self, tenor: str = "10 yr") -> float:
-        year = datetime.utcnow().year
-        frames: list[pd.DataFrame] = []
-        for candidate_year in (year, year - 1):
-            tables = pd.read_html(settings.treasury_url.format(year=candidate_year))
-            if tables:
-                for table in tables:
-                    if "Date" in table.columns:
-                        frames.append(table)
-                        break
-            if frames:
-                break
+        archive_urls = [
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rate-archives/par-yield-curve-rates-2020-2023.csv",
+            "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rate-archives/par-yield-curve-rates-1990-2023.csv",
+        ]
 
-        if not frames:
-            raise ValueError("Could not retrieve Treasury yield table.")
+        tenor_map = {
+            "1 mo": "1 Mo",
+            "2 mo": "2 Mo",
+            "3 mo": "3 Mo",
+            "4 mo": "4 Mo",
+            "6 mo": "6 Mo",
+            "1 yr": "1 Yr",
+            "2 yr": "2 Yr",
+            "3 yr": "3 Yr",
+            "5 yr": "5 Yr",
+            "7 yr": "7 Yr",
+            "10 yr": "10 Yr",
+            "20 yr": "20 Yr",
+            "30 yr": "30 Yr",
+        }
 
-        rates = frames[0].copy()
-        rates.columns = [str(col).strip().lower() for col in rates.columns]
-        tenor_col = tenor.strip().lower()
-        if tenor_col not in rates.columns:
-            tenor_map = {
-                "10 yr": "10 yr",
-                "20 yr": "20 yr",
-                "30 yr": "30 yr",
-                "5 yr": "5 yr",
-            }
-            tenor_col = tenor_map.get(tenor.lower(), "10 yr")
+        col = tenor_map.get(tenor, "10 Yr")
 
-        rates[tenor_col] = pd.to_numeric(rates[tenor_col], errors="coerce")
-        latest = rates.dropna(subset=[tenor_col]).iloc[-1]
-        return safe_float(latest[tenor_col]) / 100.0
+        for url in archive_urls:
+            try:
+                response = requests.get(url, timeout=20)
+                response.raise_for_status()
+
+                from io import StringIO
+
+                df = pd.read_csv(StringIO(response.text))
+
+                if "Date" not in df.columns or col not in df.columns:
+                    continue
+
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+                df = df.dropna(subset=[col])
+
+                if not df.empty:
+                    latest = df.iloc[-1]
+                    return float(latest[col]) / 100.0
+            except Exception:
+                continue
+
+        raise ValueError("Unable to retrieve Treasury yield curve data.")
+
+
+class YahooClient:
+    def __init__(self):
+        import yfinance as yf
+
+        self.yf = yf
+
+    def _ticker(self, symbol: str):
+        return self.yf.Ticker(symbol.upper())
+
+    def quote_summary(self, symbol: str) -> dict[str, Any]:
+        ticker = self._ticker(symbol)
+        info = ticker.info or {}
+        fast = getattr(ticker, "fast_info", {}) or {}
+
+        def fast_get(name: str, default: Any = None):
+            try:
+                return fast.get(name, default)
+            except Exception:
+                return default
+
+        return {
+            "symbol": symbol.upper(),
+            "companyName": info.get("shortName") or info.get("longName") or symbol.upper(),
+            "sector": info.get("sector"),
+            "industry": info.get("industry"),
+            "price": info.get("currentPrice") or fast_get("lastPrice"),
+            "marketCap": info.get("marketCap") or fast_get("marketCap"),
+            "sharesOutstanding": info.get("sharesOutstanding") or fast_get("shares"),
+            "enterpriseValue": info.get("enterpriseValue"),
+            "beta": info.get("beta"),
+            "totalRevenue": info.get("totalRevenue"),
+            "ebitda": info.get("ebitda"),
+            "netIncome": info.get("netIncomeToCommon"),
+            "totalCash": info.get("totalCash"),
+            "totalDebt": info.get("totalDebt"),
+        }
+
+    def quarterly_income_stmt(self, symbol: str):
+        ticker = self._ticker(symbol)
+        try:
+            return ticker.quarterly_income_stmt
+        except Exception:
+            return None
+
+    def annual_income_stmt(self, symbol: str):
+        ticker = self._ticker(symbol)
+        try:
+            return ticker.income_stmt
+        except Exception:
+            return None
+
+    def quarterly_balance_sheet(self, symbol: str):
+        ticker = self._ticker(symbol)
+        try:
+            return ticker.quarterly_balance_sheet
+        except Exception:
+            return None
+
+    def annual_balance_sheet(self, symbol: str):
+        ticker = self._ticker(symbol)
+        try:
+            return ticker.balance_sheet
+        except Exception:
+            return None
+
+    def quarterly_cashflow(self, symbol: str):
+        ticker = self._ticker(symbol)
+        try:
+            return ticker.quarterly_cashflow
+        except Exception:
+            return None
+
+    def annual_cashflow(self, symbol: str):
+        ticker = self._ticker(symbol)
+        try:
+            return ticker.cashflow
+        except Exception:
+            return None

@@ -39,7 +39,23 @@ if run:
             builder = FundamentalsBuilder()
             target = builder.build_snapshot(ticker)
             peers = PeerSelector(builder).build_peer_set(target, max_peers=max_peers)
-            risk_free_rate = builder.treasury.current_risk_free_rate('10 yr')
+            try:
+                risk_free_rate = builder.treasury.current_risk_free_rate("10 yr")
+                st.caption(f"Using live 10Y Treasury: {risk_free_rate:.2%}")
+            except Exception as exc:
+                st.warning(
+                    f"Could not fetch live Treasury rate ({exc}). Falling back to manual risk-free rate."
+                )
+                risk_free_rate = (
+                    st.sidebar.number_input(
+                        "Risk-free rate (%)",
+                        min_value=0.0,
+                        max_value=15.0,
+                        value=4.25,
+                        step=0.05,
+                    )
+                    / 100.0
+                )
             output = ValuationEngine(
                 risk_free_rate=risk_free_rate,
                 equity_risk_premium=erp,
