@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from .config import OUTPUT_DIR
+from .config import BASE_DIR
 from .utils import slugify
 from .valuation import ValuationOutput
 
 
 class ReportBuilder:
     def build_excel(self, output: ValuationOutput, output_dir: Path | None = None) -> Path:
-        output_dir = output_dir or OUTPUT_DIR
+        output_dir = output_dir or (BASE_DIR / "outputs")
         output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
         file_path = output_dir / f"{slugify(output.target.symbol)}_valuation_pack_{stamp}.xlsx"

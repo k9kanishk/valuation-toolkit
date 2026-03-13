@@ -107,7 +107,7 @@ class ValuationEngine:
                 else:
                     implied_equity = multiple * base_value
                     implied_ev = implied_equity + target.net_debt
-                implied_price = safe_per_share(implied_equity, target.shares_out)
+                implied_price = safe_per_share(implied_equity, target.shares_outstanding)
                 rows.append(
                     {
                         'method': metric,
@@ -138,10 +138,17 @@ class ValuationEngine:
         cost_of_equity = self.risk_free_rate + target.beta * self.equity_risk_premium
         debt_weight = safe_div(target.total_debt, target.total_debt + target.market_cap, default=0.15)
         equity_weight = 1 - debt_weight
-        pre_tax_cost_of_debt = safe_div(target.interest_expense, max(target.total_debt, 1), default=self.risk_free_rate + 0.015)
+
+        tax_rate = float(getattr(target, 'tax_rate', 0.21) or 0.21)
+        interest_expense = float(getattr(target, 'interest_expense', 0.0) or 0.0)
+        da_pct_sales = float(getattr(target, 'da_pct_sales', 0.03) or 0.03)
+        capex_pct_sales = float(getattr(target, 'capex_pct_sales', 0.04) or 0.04)
+        nwc_pct_sales = float(getattr(target, 'nwc_pct_sales', 0.02) or 0.02)
+
+        pre_tax_cost_of_debt = safe_div(interest_expense, max(target.total_debt, 1), default=self.risk_free_rate + 0.015)
         if pd.isna(pre_tax_cost_of_debt) or pre_tax_cost_of_debt <= 0:
             pre_tax_cost_of_debt = self.risk_free_rate + 0.015
-        after_tax_cost_of_debt = pre_tax_cost_of_debt * (1 - target.tax_rate)
+        after_tax_cost_of_debt = pre_tax_cost_of_debt * (1 - tax_rate)
         wacc = equity_weight * cost_of_equity + debt_weight * after_tax_cost_of_debt
         wacc = max(wacc, self.terminal_growth + 0.01)
 
@@ -153,12 +160,12 @@ class ValuationEngine:
             margin = base_margin + fade * (terminal_margin - base_margin)
             revenue = revenue_prev * (1 + growth)
             ebitda = revenue * margin
-            da = revenue * abs(target.da_pct_sales)
+            da = revenue * abs(da_pct_sales)
             ebit = ebitda - da
-            tax = max(ebit, 0) * target.tax_rate
-            capex = revenue * abs(target.capex_pct_sales)
-            delta_nwc = max(revenue - revenue_prev, 0) * abs(target.nwc_pct_sales)
-            fcff = ebit * (1 - target.tax_rate) + da - capex - delta_nwc
+            tax = max(ebit, 0) * tax_rate
+            capex = revenue * abs(capex_pct_sales)
+            delta_nwc = max(revenue - revenue_prev, 0) * abs(nwc_pct_sales)
+            fcff = ebit * (1 - tax_rate) + da - capex - delta_nwc
             discount_factor = 1 / ((1 + wacc) ** year)
             pv_fcff = fcff * discount_factor
             forecast_rows.append(
@@ -186,7 +193,7 @@ class ValuationEngine:
         terminal_pv = terminal_value / ((1 + wacc) ** years)
         enterprise_value = forecast['pv_fcff'].sum() + terminal_pv
         equity_value = enterprise_value - target.net_debt
-        price_per_share = safe_per_share(equity_value, target.shares_out)
+        price_per_share = safe_per_share(equity_value, target.shares_outstanding)
 
         dcf_summary = pd.DataFrame(
             [
@@ -236,7 +243,7 @@ class ValuationEngine:
                 pv_terminal_value = terminal_value / ((1 + wacc) ** last_year)
                 enterprise_value = explicit_pv + pv_terminal_value
                 equity_value = enterprise_value - target.net_debt
-                grid.loc[terminal_growth, f'{wacc:.3%}'] = safe_per_share(equity_value, target.shares_out)
+                grid.loc[terminal_growth, f'{wacc:.3%}'] = safe_per_share(equity_value, target.shares_outstanding)
 
         grid = grid.reset_index().rename(columns={'index': 'terminal_growth'})
         return grid
