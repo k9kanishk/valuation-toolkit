@@ -11,50 +11,51 @@ from src.peer_selection import PeerSelector
 from src.reporting import ReportBuilder
 from src.valuation import ValuationEngine
 
-DEFAULT_TICKER = 'AAPL'
+DEFAULT_TICKER = "AAPL"
 
-st.set_page_config(page_title='Comparable Company + DCF Toolkit', layout='wide')
-st.title('Comparable Company + DCF Valuation Toolkit')
+st.set_page_config(page_title="Comparable Company + DCF Valuation Toolkit", layout="wide")
+st.title("Comparable Company + DCF Valuation Toolkit")
 st.caption(
-    'Real-data U.S. public comps, automated peer selection, trading multiples, and DCF output pack. '
-    'Free FMP keys may fall back to annual-only data where quarterly/peer endpoints are unavailable.'
+    "SEC-backed U.S. public comps + DCF toolkit. "
+    "Treasury provides the risk-free rate, yfinance provides market convenience fields, "
+    "and an optional provider hook can be enabled later."
 )
 
 with st.sidebar:
-    st.header('Inputs')
-    ticker_input = st.text_input('Target ticker', value=DEFAULT_TICKER).upper().strip()
-    max_peers = st.slider('Max peers', min_value=4, max_value=8, value=5)
-    manual_peers = st.text_input('Manual peer override (comma-separated)', value='')
-    equity_risk_premium = st.number_input('Equity risk premium', value=0.0450, step=0.0050, format='%.4f')
-    terminal_growth = st.number_input('Terminal growth', value=0.0250, step=0.0025, format='%.4f')
-    use_fmp = st.checkbox('Use FMP if available', value=False)
-    run_clicked = st.button('Run valuation', type='primary')
+    st.header("Inputs")
+    ticker_input = st.text_input("Target ticker", value=DEFAULT_TICKER).upper().strip()
+    max_peers = st.slider("Max peers", min_value=4, max_value=8, value=5)
+    manual_peers = st.text_input("Manual peer override (comma-separated)", value="")
+    equity_risk_premium = st.number_input("Equity risk premium", value=0.0450, step=0.0050, format="%.4f")
+    terminal_growth = st.number_input("Terminal growth", value=0.0250, step=0.0025, format="%.4f")
+    use_optional_provider = st.checkbox("Use optional provider", value=False)
+    run_clicked = st.button("Run valuation", type="primary")
 
 
-if 'run_inputs' not in st.session_state:
+if "run_inputs" not in st.session_state:
     st.session_state.run_inputs = None
 
 if run_clicked:
     st.session_state.run_inputs = {
-        'ticker': ticker_input,
-        'max_peers': max_peers,
-        'manual_peers': manual_peers,
-        'equity_risk_premium': equity_risk_premium,
-        'terminal_growth': terminal_growth,
-        'use_fmp': use_fmp,
+        "ticker": ticker_input,
+        "max_peers": max_peers,
+        "manual_peers": manual_peers,
+        "equity_risk_premium": equity_risk_premium,
+        "terminal_growth": terminal_growth,
+        "use_optional_provider": use_optional_provider,
     }
 
 if st.session_state.run_inputs is None:
-    st.info('Set inputs and click Run valuation.')
+    st.info("Set inputs and click Run valuation.")
     st.stop()
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def run_model_cached(ticker: str, max_peers: int, use_fmp: bool):
-    builder = FundamentalsBuilder(use_fmp=use_fmp)
+def run_model_cached(ticker: str, max_peers: int, use_optional_provider: bool):
+    builder = FundamentalsBuilder(use_optional_provider=use_optional_provider)
     target = builder.build_snapshot(ticker)
     peers = PeerSelector(builder).build_peer_set(target, max_peers=max_peers)
-    return target, peers
+    return builder, target, peers
 
 
 def fmt_bn(x: float) -> str:
@@ -85,15 +86,14 @@ inputs = st.session_state.run_inputs
 
 try:
     with st.spinner('Pulling live data and building valuation...'):
-        target, peers = run_model_cached(
-            ticker=inputs['ticker'],
-            max_peers=inputs['max_peers'],
-            use_fmp=inputs['use_fmp'],
+        builder, target, peers = run_model_cached(
+            ticker=inputs["ticker"],
+            max_peers=inputs["max_peers"],
+            use_optional_provider=inputs["use_optional_provider"],
         )
 
-        builder = FundamentalsBuilder(use_fmp=inputs['use_fmp'])
-        if inputs['manual_peers'].strip():
-            manual_symbols = [x.strip().upper() for x in inputs['manual_peers'].split(',') if x.strip()]
+        if inputs["manual_peers"].strip():
+            manual_symbols = [x.strip().upper() for x in inputs["manual_peers"].split(",") if x.strip()]
             peer_snapshots = []
             for symbol in manual_symbols:
                 try:
@@ -140,7 +140,7 @@ try:
         target_df.style.format(
             {
                 'price': fmt_px,
-                'shares_out': '{:,.0f}',
+                'shares_outstanding': '{:,.0f}',
                 'market_cap': fmt_bn,
                 'enterprise_value': fmt_bn,
                 'total_debt': fmt_bn,
@@ -151,7 +151,6 @@ try:
                 'net_income_ltm': fmt_bn,
                 'revenue_growth': fmt_pct,
                 'ebitda_margin': fmt_pct,
-                'tax_rate': fmt_pct,
             }
         ),
         use_container_width=True,

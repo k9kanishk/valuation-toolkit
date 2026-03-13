@@ -1,15 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from .data_clients import FMPClient, SECClient, TreasuryClient, YahooClient
+from .data_clients import (
+    SECClient,
+    TreasuryClient,
+    YahooClient,
+    build_optional_client,
+    safe_float,
+)
 
-from .config import settings
-from .utils import safe_div, safe_float
+
+ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
+QUARTERLY_FORMS = {"10-Q", "10-Q/A"}
 
 
 @dataclass
@@ -20,267 +27,387 @@ class CompanySnapshot:
     industry: str
     currency: str
     price: float
-    shares_out: float
+    shares_outstanding: float
     market_cap: float
+    enterprise_value: float
     total_debt: float
     cash: float
     net_debt: float
-    enterprise_value: float
     revenue_ltm: float
     ebitda_ltm: float
     net_income_ltm: float
     revenue_growth: float
     ebitda_margin: float
-    tax_rate: float
-    da_pct_sales: float
-    capex_pct_sales: float
-    nwc_pct_sales: float
     beta: float
-    interest_expense: float
-    cik: str | None = None
+
+    @property
+    def company_name(self) -> str:
+        return self.name
 
     def to_dict(self) -> dict[str, Any]:
-        return self.__dict__.copy()
+        payload = asdict(self)
+        payload["company_name"] = self.name
+        return payload
 
 
 class FundamentalsBuilder:
-    def __init__(self, use_fmp: bool = True):
+    def __init__(self, use_optional_provider: bool = False):
         self.sec = SECClient()
         self.treasury = TreasuryClient()
         self.yahoo = YahooClient()
 
-        self.fmp = None
-        if use_fmp and settings.use_fmp:
-            try:
-                self.fmp = FMPClient()
-            except Exception:
-                self.fmp = None
+        self.optional_client = build_optional_client(enabled=use_optional_provider)
+        self.fmp = self.optional_client  # backward-compatible alias for older code
 
         self._snapshot_cache: dict[str, CompanySnapshot] = {}
 
     @staticmethod
-    def _df_row_sum(df: pd.DataFrame | None, candidates: list[str]) -> float:
+    def _stmt_ltm(df: pd.DataFrame | None, labels: list[str]) -> float | None:
         if df is None or df.empty:
-            return np.nan
-        for name in candidates:
-            if name in df.index:
-                try:
-                    vals = pd.to_numeric(df.loc[name], errors='coerce').dropna()
-                    if not vals.empty:
-                        return float(vals.iloc[:4].sum()) if len(vals) >= 4 else float(vals.iloc[0])
-                except Exception:
-                    continue
-        return np.nan
+            return None
+        for label in labels:
+            if label in df.index:
+                vals = pd.to_numeric(df.loc[label], errors="coerce").dropna()
+                if len(vals) >= 4:
+                    return float(vals.iloc[:4].sum())
+                if len(vals) >= 1:
+                    return float(vals.iloc[0])
+        return None
 
     @staticmethod
-    def _df_latest_value(df: pd.DataFrame | None, candidates: list[str]) -> float:
+    def _stmt_latest(df: pd.DataFrame | None, labels: list[str]) -> float | None:
         if df is None or df.empty:
-            return np.nan
-        for name in candidates:
-            if name in df.index:
-                try:
-                    vals = pd.to_numeric(df.loc[name], errors='coerce').dropna()
-                    if not vals.empty:
-                        return float(vals.iloc[0])
-                except Exception:
+            return None
+        for label in labels:
+            if label in df.index:
+                vals = pd.to_numeric(df.loc[label], errors="coerce").dropna()
+                if len(vals) >= 1:
+                    return float(vals.iloc[0])
+        return None
+
+    @staticmethod
+    def _stmt_growth_from_quarters(df: pd.DataFrame | None, labels: list[str]) -> float | None:
+        if df is None or df.empty:
+            return None
+        for label in labels:
+            if label in df.index:
+                vals = pd.to_numeric(df.loc[label], errors="coerce").dropna()
+                if len(vals) >= 8:
+                    recent = float(vals.iloc[:4].sum())
+                    prior = float(vals.iloc[4:8].sum())
+                    if prior != 0:
+                        return recent / prior - 1.0
+        return None
+
+    @staticmethod
+    def _stmt_growth_from_annual(df: pd.DataFrame | None, labels: list[str]) -> float | None:
+        if df is None or df.empty:
+            return None
+        for label in labels:
+            if label in df.index:
+                vals = pd.to_numeric(df.loc[label], errors="coerce").dropna()
+                if len(vals) >= 2 and vals.iloc[1] != 0:
+                    return float(vals.iloc[0] / vals.iloc[1] - 1.0)
+        return None
+
+    @staticmethod
+    def _company_facts_values(
+        company_facts: dict[str, Any] | None,
+        *,
+        taxonomy: str,
+        concepts: list[str],
+        unit: str,
+        forms: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        if not company_facts:
+            return []
+
+        facts = company_facts.get("facts", {}).get(taxonomy, {})
+        rows: list[dict[str, Any]] = []
+
+        for concept in concepts:
+            concept_block = facts.get(concept, {})
+            units_block = concept_block.get("units", {})
+            items = units_block.get(unit, [])
+            for item in items:
+                val = safe_float(item.get("val"))
+                if val is None:
                     continue
-        return np.nan
+                form = str(item.get("form", "")).upper()
+                if forms and form not in forms:
+                    continue
+                end_dt = pd.to_datetime(item.get("end"), errors="coerce")
+                filed_dt = pd.to_datetime(item.get("filed"), errors="coerce")
+                rows.append(
+                    {
+                        "concept": concept,
+                        "val": float(val),
+                        "form": form,
+                        "end": end_dt,
+                        "filed": filed_dt,
+                        "fy": item.get("fy"),
+                        "fp": item.get("fp"),
+                    }
+                )
+
+        rows.sort(
+            key=lambda x: (
+                pd.Timestamp.min if pd.isna(x["end"]) else x["end"],
+                pd.Timestamp.min if pd.isna(x["filed"]) else x["filed"],
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def _sec_latest_value(
+        self,
+        company_facts: dict[str, Any] | None,
+        *,
+        taxonomy: str,
+        concepts: list[str],
+        unit: str,
+        forms: set[str] | None = None,
+    ) -> float | None:
+        rows = self._company_facts_values(
+            company_facts,
+            taxonomy=taxonomy,
+            concepts=concepts,
+            unit=unit,
+            forms=forms,
+        )
+        return rows[0]["val"] if rows else None
+
+    def _sec_annual_growth(
+        self,
+        company_facts: dict[str, Any] | None,
+        *,
+        taxonomy: str,
+        concepts: list[str],
+        unit: str,
+    ) -> float | None:
+        rows = self._company_facts_values(
+            company_facts,
+            taxonomy=taxonomy,
+            concepts=concepts,
+            unit=unit,
+            forms=ANNUAL_FORMS,
+        )
+        if len(rows) >= 2 and rows[1]["val"] != 0:
+            return rows[0]["val"] / rows[1]["val"] - 1.0
+        return None
 
     def build_snapshot(self, symbol: str) -> CompanySnapshot:
         symbol = symbol.upper().strip()
         if symbol in self._snapshot_cache:
             return self._snapshot_cache[symbol]
 
-        profile = self.fmp.profile(symbol) if self.fmp else {}
-        quote = self.fmp.quote(symbol) if self.fmp else {}
-        ratios = self.fmp.ratios_ttm(symbol) if self.fmp else {}
-        metrics = self.fmp.key_metrics_ttm(symbol) if self.fmp else {}
-        ev_rows = self.fmp.enterprise_values(symbol, limit=1) if self.fmp else []
-        annual_cf = self.fmp.cash_flow(symbol, period='annual', limit=5) if self.fmp else []
+        optional_profile = self.optional_client.profile(symbol)
+        optional_quote = self.optional_client.quote(symbol)
+        optional_ratios = self.optional_client.ratios_ttm(symbol)
+        optional_metrics = self.optional_client.key_metrics_ttm(symbol)
+        optional_ev_rows = self.optional_client.enterprise_values(symbol, limit=1)
 
-        yq = self.yahoo.quote_summary(symbol)
+        yahoo = self.yahoo.quote_summary(symbol)
         q_is = self.yahoo.quarterly_income_stmt(symbol)
         a_is = self.yahoo.annual_income_stmt(symbol)
         q_bs = self.yahoo.quarterly_balance_sheet(symbol)
         a_bs = self.yahoo.annual_balance_sheet(symbol)
-        q_cf = self.yahoo.quarterly_cashflow(symbol)
-        a_cf = self.yahoo.annual_cashflow(symbol)
 
         sec_row = self.sec.lookup_ticker(symbol)
-        cik = sec_row.get('cik_str') if sec_row else None
+        company_facts = None
+        if sec_row and sec_row.get("cik_str"):
+            try:
+                company_facts = self.sec.company_facts(sec_row["cik_str"])
+            except Exception:
+                company_facts = None
 
-        name = profile.get('companyName') or profile.get('name') or yq.get('companyName') or symbol
-        sector = profile.get('sector') or yq.get('sector') or 'Unknown'
-        industry = profile.get('industry') or yq.get('industry') or 'Unknown'
-        currency = profile.get('currency') or 'USD'
+        sec_name = sec_row.get("name") if sec_row else None
+        sec_shares = self._sec_latest_value(
+            company_facts,
+            taxonomy="dei",
+            concepts=["EntityCommonStockSharesOutstanding", "CommonStockSharesOutstanding"],
+            unit="shares",
+            forms=None,
+        )
+
+        sec_revenue = self._sec_latest_value(
+            company_facts,
+            taxonomy="us-gaap",
+            concepts=[
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "SalesRevenueNet",
+                "Revenues",
+            ],
+            unit="USD",
+            forms=ANNUAL_FORMS,
+        )
+
+        sec_net_income = self._sec_latest_value(
+            company_facts,
+            taxonomy="us-gaap",
+            concepts=["NetIncomeLoss", "ProfitLoss"],
+            unit="USD",
+            forms=ANNUAL_FORMS,
+        )
+
+        sec_cash = self._sec_latest_value(
+            company_facts,
+            taxonomy="us-gaap",
+            concepts=[
+                "CashAndCashEquivalentsAtCarryingValue",
+                "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+                "CashCashEquivalentsAndShortTermInvestments",
+            ],
+            unit="USD",
+            forms=None,
+        )
+
+        sec_total_debt = self._sec_latest_value(
+            company_facts,
+            taxonomy="us-gaap",
+            concepts=[
+                "DebtAndFinanceLeaseObligations",
+                "LongTermDebtAndCapitalLeaseObligation",
+                "LongTermDebtNoncurrent",
+                "LongTermDebt",
+            ],
+            unit="USD",
+            forms=None,
+        )
+
+        name = (
+            optional_profile.get("companyName")
+            or yahoo.get("name")
+            or sec_name
+            or symbol
+        )
+        sector = (
+            optional_profile.get("sector")
+            or yahoo.get("sector")
+            or "Unknown"
+        )
+        industry = (
+            optional_profile.get("industry")
+            or yahoo.get("industry")
+            or "Unknown"
+        )
+        currency = yahoo.get("currency") or "USD"
+
+        price = safe_float(optional_quote.get("price")) or safe_float(yahoo.get("price")) or 0.0
 
         shares_outstanding = (
-            safe_float(metrics.get('sharesOutstanding'))
-            or safe_float(quote.get('sharesOutstanding'))
-            or safe_float(yq.get('sharesOutstanding'))
+            safe_float(optional_metrics.get("sharesOutstanding"))
+            or safe_float(optional_quote.get("sharesOutstanding"))
+            or safe_float(yahoo.get("sharesOutstanding"))
+            or sec_shares
+            or 0.0
         )
-
-        price = safe_float(quote.get('price')) or safe_float(yq.get('price'))
 
         market_cap = (
-            safe_float(quote.get('marketCap'))
-            or safe_float(yq.get('marketCap'))
+            safe_float(optional_quote.get("marketCap"))
+            or safe_float(yahoo.get("marketCap"))
+            or 0.0
         )
+
+        if market_cap <= 0 and price > 0 and shares_outstanding > 0:
+            market_cap = price * shares_outstanding
+
+        if shares_outstanding <= 0 and market_cap > 0 and price > 0:
+            shares_outstanding = market_cap / price
 
         total_debt = (
-            safe_float(yq.get('totalDebt'))
-            or self._df_latest_value(q_bs, ['Total Debt', 'Current Debt And Capital Lease Obligation'])
-            or self._df_latest_value(a_bs, ['Total Debt', 'Current Debt And Capital Lease Obligation'])
+            safe_float(yahoo.get("totalDebt"))
+            or self._stmt_latest(a_bs, ["Total Debt", "Current Debt And Capital Lease Obligation"])
+            or sec_total_debt
             or 0.0
         )
+
         cash = (
-            safe_float(yq.get('totalCash'))
-            or self._df_latest_value(
-                q_bs,
-                ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments'],
-            )
-            or self._df_latest_value(
+            safe_float(yahoo.get("totalCash"))
+            or self._stmt_latest(
                 a_bs,
-                ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments'],
+                ["Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"],
             )
+            or sec_cash
             or 0.0
         )
-        net_debt = max(total_debt - cash, 0.0)
+
+        net_debt = max(float(total_debt) - float(cash), 0.0)
 
         revenue_ltm = (
-            safe_float(ratios.get('revenuePerShareTTM')) * shares_outstanding
-            if safe_float(ratios.get('revenuePerShareTTM')) and shares_outstanding
-            else np.nan
+            safe_float(yahoo.get("totalRevenue"))
+            or self._stmt_ltm(q_is, ["Total Revenue", "Revenue"])
+            or self._stmt_latest(a_is, ["Total Revenue", "Revenue"])
+            or sec_revenue
+            or 0.0
         )
-        if pd.isna(revenue_ltm):
-            revenue_ltm = (
-                safe_float(yq.get('totalRevenue'))
-                or self._df_row_sum(q_is, ['Total Revenue', 'Revenue'])
-                or self._df_latest_value(a_is, ['Total Revenue', 'Revenue'])
-                or 0.0
-            )
 
         ebitda_ltm = (
-            safe_float(yq.get('ebitda'))
-            or self._df_row_sum(q_is, ['EBITDA', 'Normalized EBITDA'])
-            or self._df_latest_value(a_is, ['EBITDA', 'Normalized EBITDA'])
+            safe_float(yahoo.get("ebitda"))
+            or self._stmt_ltm(q_is, ["EBITDA", "Normalized EBITDA"])
+            or self._stmt_latest(a_is, ["EBITDA", "Normalized EBITDA"])
             or 0.0
         )
 
         net_income_ltm = (
-            safe_float(yq.get('netIncome'))
-            or self._df_row_sum(q_is, ['Net Income', 'Net Income Common Stockholders'])
-            or self._df_latest_value(a_is, ['Net Income', 'Net Income Common Stockholders'])
+            safe_float(yahoo.get("netIncome"))
+            or self._stmt_ltm(q_is, ["Net Income", "Net Income Common Stockholders"])
+            or self._stmt_latest(a_is, ["Net Income", "Net Income Common Stockholders"])
+            or sec_net_income
             or 0.0
         )
 
-        enterprise_value = safe_float(ev_rows[0].get('enterpriseValue')) if ev_rows else np.nan
-        if pd.isna(enterprise_value):
-            enterprise_value = safe_float(yq.get('enterpriseValue')) or (market_cap + total_debt - cash if market_cap else np.nan)
+        enterprise_value = (
+            safe_float(optional_ev_rows[0].get("enterpriseValue")) if optional_ev_rows else None
+        )
+        enterprise_value = enterprise_value or safe_float(yahoo.get("enterpriseValue")) or 0.0
 
-        price = float(price or 0.0)
-        market_cap = float(market_cap or 0.0)
-        shares_outstanding = float(shares_outstanding or 0.0)
-        enterprise_value = float(enterprise_value or 0.0)
-        total_debt = float(total_debt or 0.0)
-        cash = float(cash or 0.0)
-        net_debt = float(net_debt or 0.0)
-
-        # Derive missing shares outstanding from market cap / price
-        if shares_outstanding <= 0 and market_cap > 0 and price > 0:
-            shares_outstanding = market_cap / price
-
-        # Derive missing market cap from price * shares
-        if market_cap <= 0 and price > 0 and shares_outstanding > 0:
-            market_cap = price * shares_outstanding
-
-        # Derive missing market cap from EV - net debt
-        if market_cap <= 0 and enterprise_value > 0:
-            derived_mc = enterprise_value - net_debt
-            if derived_mc > 0:
-                market_cap = derived_mc
-
-        # Derive missing EV from market cap + net debt
         if enterprise_value <= 0 and market_cap > 0:
             enterprise_value = market_cap + net_debt
 
-        revenue_growth = np.nan
-        if q_is is not None and not q_is.empty:
-            for revenue_label in ['Total Revenue', 'Revenue']:
-                if revenue_label in q_is.index:
-                    try:
-                        vals = pd.to_numeric(q_is.loc[revenue_label], errors='coerce').dropna()
-                        if len(vals) >= 8:
-                            recent4 = vals.iloc[:4].sum()
-                            prior4 = vals.iloc[4:8].sum()
-                            if prior4 and prior4 != 0:
-                                revenue_growth = (recent4 / prior4) - 1
-                                break
-                    except Exception:
-                        pass
-        if pd.isna(revenue_growth):
-            revenue_growth = 0.05
-
-        ebitda_margin = (ebitda_ltm / revenue_ltm) if revenue_ltm and revenue_ltm > 0 else 0.0
-        beta = safe_float(yq.get('beta')) or safe_float(profile.get('beta')) or safe_float(metrics.get('beta')) or 1.0
-
-        effective_tax = safe_float(ratios.get('effectiveTaxRateTTM')) or safe_float(ratios.get('effectiveTaxRate')) or 0.25
-        tax_rate = float(np.clip(effective_tax, 0.0, 0.40))
-
-        fmp_da = safe_float(annual_cf[0].get('depreciationAndAmortization')) if annual_cf else np.nan
-        fmp_capex = safe_float(annual_cf[0].get('capitalExpenditure')) if annual_cf else np.nan
-
-        da_pct_sales = safe_div(
-            self._df_latest_value(q_cf, ['Depreciation Amortization Depletion', 'Depreciation And Amortization'])
-            or self._df_latest_value(a_cf, ['Depreciation Amortization Depletion', 'Depreciation And Amortization'])
-            or fmp_da,
-            revenue_ltm,
-            default=0.03,
-        )
-        capex_pct_sales = abs(
-            safe_div(
-                self._df_latest_value(q_cf, ['Capital Expenditure'])
-                or self._df_latest_value(a_cf, ['Capital Expenditure'])
-                or fmp_capex,
-                revenue_ltm,
-                default=0.04,
+        revenue_growth = (
+            self._stmt_growth_from_quarters(q_is, ["Total Revenue", "Revenue"])
+            or self._stmt_growth_from_annual(a_is, ["Total Revenue", "Revenue"])
+            or self._sec_annual_growth(
+                company_facts,
+                taxonomy="us-gaap",
+                concepts=[
+                    "RevenueFromContractWithCustomerExcludingAssessedTax",
+                    "SalesRevenueNet",
+                    "Revenues",
+                ],
+                unit="USD",
             )
+            or 0.05
         )
 
-        nwc = self._df_latest_value(q_bs, ['Working Capital']) or self._df_latest_value(a_bs, ['Working Capital'])
-        nwc_pct_sales = safe_div(nwc, revenue_ltm, default=0.12)
-
-        interest_expense = abs(
-            self._df_latest_value(q_is, ['Interest Expense', 'Interest Expense Non Operating'])
-            or self._df_latest_value(a_is, ['Interest Expense', 'Interest Expense Non Operating'])
-            or 0.0
+        ebitda_margin = (ebitda_ltm / revenue_ltm) if revenue_ltm and revenue_ltm > 0 else 0.15
+        beta = (
+            safe_float(yahoo.get("beta"))
+            or safe_float(optional_profile.get("beta"))
+            or 1.0
         )
 
         snapshot = CompanySnapshot(
             symbol=symbol,
-            name=str(name),
-            sector=str(sector),
-            industry=str(industry),
-            currency=str(currency),
+            name=name,
+            sector=sector,
+            industry=industry,
+            currency=currency,
             price=float(price or 0.0),
-            shares_out=float(shares_outstanding or 0.0),
+            shares_outstanding=float(shares_outstanding or 0.0),
             market_cap=float(market_cap or 0.0),
+            enterprise_value=float(enterprise_value or 0.0),
             total_debt=float(total_debt or 0.0),
             cash=float(cash or 0.0),
             net_debt=float(net_debt or 0.0),
-            enterprise_value=float(enterprise_value or 0.0),
             revenue_ltm=float(revenue_ltm or 0.0),
             ebitda_ltm=float(ebitda_ltm or 0.0),
             net_income_ltm=float(net_income_ltm or 0.0),
             revenue_growth=float(revenue_growth or 0.0),
             ebitda_margin=float(ebitda_margin or 0.0),
-            tax_rate=float(tax_rate or 0.25),
-            da_pct_sales=float(da_pct_sales or 0.03),
-            capex_pct_sales=float(capex_pct_sales or 0.04),
-            nwc_pct_sales=float(nwc_pct_sales or 0.12),
             beta=float(beta or 1.0),
-            interest_expense=float(interest_expense or 0.0),
-            cik=cik,
         )
+
         self._snapshot_cache[symbol] = snapshot
         return snapshot
